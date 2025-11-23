@@ -3,6 +3,9 @@ import os
 import uuid
 import random
 import smtplib
+import requests
+from dotenv import load_dotenv 
+load_dotenv()
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 
@@ -38,36 +41,82 @@ UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 # ---------------------------
-# EMAIL CONFIG (GMAIL SMTP)
+# EMAIL CONFIG
 # ---------------------------
+# For local Gmail SMTP (same as before)
 EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
 
+# For production email API (Resend)
+RESEND_API_KEY = os.getenv("RESEND_API_KEY")
+FROM_EMAIL = os.getenv("FROM_EMAIL", "InternConnect <onboarding@resend.dev>")
+# e.g. "InternConnect <no-reply@yourdomain.com>"
 
-def send_email_otp(to_email, otp):
-    if not EMAIL_USER or not EMAIL_PASS:
-        print("\n❗ EMAIL ERROR: Missing EMAIL_USER or EMAIL_PASS env vars\n")
-        return False
 
-    try:
-        msg = EmailMessage()
-        msg["Subject"] = "Your OTP Verification Code"
-        msg["From"] = EMAIL_USER
-        msg["To"] = to_email
-        msg.set_content(
-            f"Your verification OTP is: {otp}\n\nThis code will expire in 5 minutes."
-        )
+def send_email_otp(to_email, otp: int) -> bool:
+    """
+    Send OTP email.
 
-        server = smtplib.SMTP("smtp.gmail.com", 587)
-        server.starttls()
-        server.login(EMAIL_USER, EMAIL_PASS)
-        server.send_message(msg)
-        server.quit()
-        return True
-    except Exception as e:
-        print("SMTP ERROR:", e)
-        return False
+    Priority:
+      1) If RESEND_API_KEY is set -> send via Resend HTTP API (for Render).
+      2) Else if EMAIL_USER/PASS set -> send via Gmail SMTP (for local).
+      3) Else -> fail.
+    """
 
+    subject = "Your OTP Verification Code"
+    body_text = f"Your verification OTP is: {otp}\n\nThis code will expire in 5 minutes."
+
+    # ---------- 1) Resend API (recommended for Render) ----------
+    if RESEND_API_KEY:
+        try:
+            resp = requests.post(
+                "https://api.resend.com/emails",
+                headers={
+                    "Authorization": f"Bearer {RESEND_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "from": FROM_EMAIL,
+                    "to": [to_email],
+                    "subject": subject,
+                    "text": body_text,
+                },
+                timeout=10,
+            )
+            print("Resend response:", resp.status_code, resp.text)
+            if resp.status_code in (200, 201):
+                print(f"[EMAIL] Sent OTP via Resend to {to_email}")
+                return True
+            else:
+                print("[EMAIL] Resend API error:", resp.status_code, resp.text)
+        except Exception as e:
+            print("[EMAIL] Exception calling Resend API:", e)
+
+        # if API path failed, we try SMTP next (fallback)
+
+    # ---------- 2) Gmail SMTP (for local dev) ----------
+    if EMAIL_USER and EMAIL_PASS:
+        try:
+            msg = EmailMessage()
+            msg["Subject"] = subject
+            msg["From"] = EMAIL_USER
+            msg["To"] = to_email
+            msg.set_content(body_text)
+
+            # use SSL, 465 often works better behind some hosts
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=10) as server:
+                server.login(EMAIL_USER, EMAIL_PASS)
+                server.send_message(msg)
+
+            print(f"[EMAIL] Sent OTP via Gmail SMTP to {to_email}")
+            return True
+        except Exception as e:
+            print("SMTP ERROR:", e)
+            return False
+
+    # ---------- 3) No config ----------
+    print("❗ EMAIL ERROR: No RESEND_API_KEY or EMAIL_USER/EMAIL_PASS configured.")
+    return False
 
 # ---------------------------
 # TEMP OTP STORAGE (in-memory)
