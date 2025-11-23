@@ -652,6 +652,21 @@ def otp_password_request():
 
     return jsonify({"success": True}), 200
 
+@app.route("/", methods=["GET"])
+def index():
+    return {
+        "success": True,
+        "message": "InternConnect backend is running",
+        "endpoints": [
+            "/internships",
+            "/internships/search",
+            "/apply",
+            "/api/auth/login",
+            "/api/auth/register",
+        ],
+    }, 200
+
+
 
 @app.route("/otp/password/reset", methods=["POST"])
 def otp_password_reset():
