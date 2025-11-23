@@ -1,16 +1,21 @@
 # backend/app.py
 import os
 import uuid
-from datetime import datetime
+import random
+import smtplib
+from datetime import datetime, timedelta
+from email.message import EmailMessage
+
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from sqlalchemy import func, or_
 
-# import your models module (must expose: db, Users, Internships, Applications)
 from models import db, Users, Internships, Applications
 
 app = Flask(__name__, static_folder=None)
-CORS(app)
+
+# Allow all origins for dev
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
 # ---------------------------
 # DATABASE PATH
@@ -23,7 +28,6 @@ app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{DB_PATH}"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
 db.init_app(app)
-
 with app.app_context():
     db.create_all()
 
@@ -32,6 +36,46 @@ with app.app_context():
 # ---------------------------
 UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+# ---------------------------
+# EMAIL CONFIG (GMAIL SMTP)
+# ---------------------------
+EMAIL_USER = os.getenv("EMAIL_USER")
+EMAIL_PASS = os.getenv("EMAIL_PASS")
+
+
+def send_email_otp(to_email, otp):
+    if not EMAIL_USER or not EMAIL_PASS:
+        print("\n❗ EMAIL ERROR: Missing EMAIL_USER or EMAIL_PASS env vars\n")
+        return False
+
+    try:
+        msg = EmailMessage()
+        msg["Subject"] = "Your OTP Verification Code"
+        msg["From"] = EMAIL_USER
+        msg["To"] = to_email
+        msg.set_content(
+            f"Your verification OTP is: {otp}\n\nThis code will expire in 5 minutes."
+        )
+
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(EMAIL_USER, EMAIL_PASS)
+        server.send_message(msg)
+        server.quit()
+        return True
+    except Exception as e:
+        print("SMTP ERROR:", e)
+        return False
+
+
+# ---------------------------
+# TEMP OTP STORAGE (in-memory)
+# ---------------------------
+pending_register_otps = {}  # email -> {otp, expires}
+pending_login_otps = {}     # email -> {otp, expires}
+login_temp_tokens = {}    
+pending_password_otps = {} # tempToken -> email
 
 # ---------------------------
 # Helper: Convert internship row
@@ -52,14 +96,15 @@ def internship_to_dict(i: Internships):
         "other": i.other,
     }
 
+
 # ---------------------------
-# Helper: Serialize user for frontend
+# Helper: Serialize user for frontend  (fixed indentation)
 # ---------------------------
 def _user_to_dict(u: Users):
-    # read organization field (common names: org, organization) safely
     org = getattr(u, "org", None) or getattr(u, "organization", None) or ""
     profile_pic = getattr(u, "profile_pic", None) or None
-        # always recompute from Applications to be safe
+
+    # always recompute from Applications to be safe
     try:
         applied_count = Applications.query.filter_by(email=u.email).count()
     except Exception:
@@ -73,7 +118,6 @@ def _user_to_dict(u: Users):
         except Exception:
             pass
 
-
     return {
         "id": u.id,
         "username": u.username,
@@ -81,15 +125,15 @@ def _user_to_dict(u: Users):
         "phone": u.phone or "",
         "org": org,
         "profile_pic": profile_pic,
-        "applied_count": applied_count or 0
+        "applied_count": applied_count or 0,
     }
+
 
 # ---------------------------
 # Simple token handling helper
-# - if Users model has a 'token' attribute, we will store token there
-# - otherwise fall back to a single DEV token (compatible with older frontend)
 # ---------------------------
 DEV_TOKEN = "dev-token-12345"
+
 
 def set_user_token(user: Users, token_value: str):
     if hasattr(user, "token"):
@@ -97,6 +141,7 @@ def set_user_token(user: Users, token_value: str):
         db.session.commit()
         return True
     return False
+
 
 def get_user_from_token_header(auth_header: str):
     """Return Users instance matching Bearer token, or None"""
@@ -119,13 +164,12 @@ def get_user_from_token_header(auth_header: str):
 
     return None
 
-# ---------------------------
-# Regular routes (your existing ones)
-# ---------------------------
 
 # ---------------------------
-# Register (legacy)
+# Legacy routes (unchanged)
 # ---------------------------
+
+# Register (legacy)
 @app.route("/register", methods=["POST"])
 def register():
     data = request.get_json(silent=True) or {}
@@ -136,7 +180,15 @@ def register():
     password = (data.get("password") or "").strip()
 
     if not username or not email or not password:
-        return jsonify({"success": False, "message": "username, email & password required"}), 400
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "message": "username, email & password required",
+                }
+            ),
+            400,
+        )
 
     if Users.query.filter_by(email=email).first():
         return jsonify({"success": False, "message": "Email already exists"}), 200
@@ -147,9 +199,8 @@ def register():
 
     return jsonify({"success": True, "message": "User registered successfully"}), 200
 
-# ---------------------------
+
 # Login (legacy)
-# ---------------------------
 @app.route("/login", methods=["POST"])
 def login():
     data = request.get_json(silent=True) or {}
@@ -158,35 +209,41 @@ def login():
     password = (data.get("password") or "").strip()
 
     if not email or not password:
-        return jsonify({"success": False, "message": "email and password required"}), 400
+        return (
+            jsonify({"success": False, "message": "email and password required"}),
+            400,
+        )
 
     user = Users.query.filter_by(email=email).first()
 
     if not user or user.password != password:
         return jsonify({"success": False, "message": "Invalid credentials"}), 200
 
-    return jsonify({
-        "success": True,
-        "message": "Login successful",
-        "user": {
-            "id": user.id,
-            "username": user.username,
-            "email": user.email
-        }
-    }), 200
+    return (
+        jsonify(
+            {
+                "success": True,
+                "message": "Login successful",
+                "user": {
+                    "id": user.id,
+                    "username": user.username,
+                    "email": user.email,
+                },
+            }
+        ),
+        200,
+    )
 
-# ---------------------------
+
 # Get all internships
-# ---------------------------
 @app.route("/internships", methods=["GET"])
 def get_internships():
     internships = Internships.query.all()
     data = [internship_to_dict(i) for i in internships]
     return jsonify({"success": True, "count": len(data), "results": data}), 200
 
-# ---------------------------
+
 # Get internship by ID
-# ---------------------------
 @app.route("/internships/<int:internship_id>", methods=["GET"])
 def internship_by_id(internship_id):
     i = Internships.query.get(internship_id)
@@ -194,9 +251,8 @@ def internship_by_id(internship_id):
         return jsonify({"success": False, "message": "Internship not found"}), 404
     return jsonify({"success": True, "internship": internship_to_dict(i)}), 200
 
-# ---------------------------
+
 # Search internships
-# ---------------------------
 @app.route("/internships/search", methods=["POST"])
 def internship_search():
     filters = request.get_json(silent=True) or {}
@@ -213,7 +269,6 @@ def internship_search():
 
     query = Internships.query
 
-    # DOMAIN OR-search
     if domain_filters:
         if isinstance(domain_filters, list):
             conditions = [
@@ -222,9 +277,10 @@ def internship_search():
             ]
             query = query.filter(or_(*conditions))
         else:
-            query = query.filter(func.lower(Internships.domains).like(f"%{domain_filters.lower()}%"))
+            query = query.filter(
+                func.lower(Internships.domains).like(f"%{domain_filters.lower()}%")
+            )
 
-    # SKILL OR-search
     if skill_filters:
         if isinstance(skill_filters, list):
             conditions = [
@@ -233,17 +289,18 @@ def internship_search():
             ]
             query = query.filter(or_(*conditions))
         else:
-            query = query.filter(func.lower(Internships.skills).like(f"%{skill_filters.lower()}%"))
+            query = query.filter(
+                func.lower(Internships.skills).like(f"%{skill_filters.lower()}%")
+            )
 
-    # LOCATION AND
     if location:
-        query = query.filter(func.lower(Internships.location).like(f"%{location.lower()}%"))
+        query = query.filter(
+            func.lower(Internships.location).like(f"%{location.lower()}%")
+        )
 
-    # MODE AND
     if mode:
         query = query.filter(func.lower(Internships.mode).like(f"%{mode.lower()}%"))
 
-    # PAID AND
     if paid:
         query = query.filter(func.lower(Internships.paid).like(f"%{paid.lower()}%"))
 
@@ -253,36 +310,37 @@ def internship_search():
 
     return jsonify({"success": True, "count": total, "results": results}), 200
 
-# ---------------------------
-# SIMPLE APPLY (matches your DB)
-# ---------------------------
-# ---------------------------
-# SIMPLE APPLY (matches your DB)
-# ---------------------------
-# ---------------------------
+
 # SIMPLE APPLY (matches your DB) + bump applied_count
-# ---------------------------
 @app.route("/apply", methods=["POST"])
 def apply():
     data = request.get_json(silent=True) or {}
 
-    required = ["internship_id", "name", "email", "country", "age"]
+    # Only these are strictly required:
+    required = ["internship_id", "name", "email"]
     for f in required:
         if not data.get(f):
             return jsonify({"success": False, "message": f"{f} is required"}), 400
+
+    # Optional fields with safe defaults
+    country = data.get("country") or "Not specified"
+    try:
+        age = int(data.get("age") or 0)
+    except Exception:
+        age = 0
 
     application = Applications(
         internship_id=int(data["internship_id"]),
         name=data["name"],
         email=data["email"],
-        country=data["country"],
-        age=int(data["age"]),
-        college_name=data.get("college_name")
+        country=country,
+        age=age,
+        college_name=data.get("college_name"),
     )
 
     db.session.add(application)
 
-    # 🔹 NEW: also update user's applied_count, if that email exists
+    # update user's applied_count, if that email exists
     try:
         email = (data["email"] or "").strip().lower()
         user = Users.query.filter(func.lower(Users.email) == email).first()
@@ -293,7 +351,6 @@ def apply():
                 user.applied_count = int(user.applied_count) + 1
         db.session.commit()
     except Exception as e:
-        # If counter update fails, don't break the application submission
         db.session.rollback()
         print("WARN: application saved but failed to bump applied_count:", e)
         return jsonify({"success": True, "message": "Application submitted"}), 200
@@ -303,12 +360,7 @@ def apply():
 
 # ---------------------------------------------------------------
 # DEV compatibility endpoints for frontend (API-style)
-# - /api/auth/register
-# - /api/auth/login
-# - /api/me  (GET / PUT)
-# - /api/me/picture (PUT multipart)
 # ---------------------------------------------------------------
-
 @app.route("/api/auth/register", methods=["POST"])
 def api_auth_register():
     data = request.get_json(silent=True) or {}
@@ -318,28 +370,39 @@ def api_auth_register():
     password = (data.get("password") or "").strip()
 
     if not username or not email or not password:
-        return jsonify({"success": False, "message": "username, email & password required"}), 400
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "message": "username, email & password required",
+                }
+            ),
+            400,
+        )
 
     if Users.query.filter_by(email=email).first():
         return jsonify({"success": False, "message": "Email already exists"}), 409
 
-    # create user
     user = Users(username=username, email=email, phone=phone, password=password)
     db.session.add(user)
     db.session.commit()
 
-    # attempt to set per-user token if model has attribute
     token_value = str(uuid.uuid4())
     if not set_user_token(user, token_value):
-        # model doesn't support per-user token: return DEV token still
         token_value = DEV_TOKEN
 
-    return jsonify({
-        "success": True,
-        "message": "User registered",
-        "token": token_value,
-        "user": _user_to_dict(user)
-    }), 200
+    return (
+        jsonify(
+            {
+                "success": True,
+                "message": "User registered",
+                "token": token_value,
+                "user": _user_to_dict(user),
+            }
+        ),
+        200,
+    )
+
 
 @app.route("/api/auth/login", methods=["POST"])
 def api_auth_login():
@@ -348,7 +411,10 @@ def api_auth_login():
     password = (data.get("password") or "").strip()
 
     if not email or not password:
-        return jsonify({"success": False, "message": "email and password required"}), 400
+        return (
+            jsonify({"success": False, "message": "email and password required"}),
+            400,
+        )
 
     user = Users.query.filter_by(email=email).first()
     if not user or user.password != password:
@@ -358,12 +424,18 @@ def api_auth_login():
     if not set_user_token(user, token_value):
         token_value = DEV_TOKEN
 
-    return jsonify({
-        "success": True,
-        "message": "Login successful",
-        "token": token_value,
-        "user": _user_to_dict(user)
-    }), 200
+    return (
+        jsonify(
+            {
+                "success": True,
+                "message": "Login successful",
+                "token": token_value,
+                "user": _user_to_dict(user),
+            }
+        ),
+        200,
+    )
+
 
 @app.route("/api/me", methods=["GET"])
 def api_me_get():
@@ -373,6 +445,7 @@ def api_me_get():
         return jsonify({"success": False, "message": "Unauthorized"}), 401
     return jsonify(_user_to_dict(user)), 200
 
+
 @app.route("/api/me", methods=["PUT", "POST"])
 def api_me_update():
     auth = request.headers.get("Authorization", "")
@@ -380,26 +453,24 @@ def api_me_update():
     if not user:
         return jsonify({"success": False, "message": "Unauthorized"}), 401
 
-    # Accept JSON or form-data
-    data = {}
     if request.is_json:
         data = request.get_json(silent=True) or {}
     else:
         data = request.form.to_dict() or {}
 
-    # update safe fields
     if "username" in data:
         user.username = data["username"]
     if "phone" in data:
         user.phone = data["phone"]
     if "org" in data:
-        # write to either 'org' or 'organization' if present
         if hasattr(user, "org"):
             setattr(user, "org", data["org"])
         elif hasattr(user, "organization"):
             setattr(user, "organization", data["org"])
+
     db.session.commit()
     return jsonify({"success": True, "user": _user_to_dict(user)}), 200
+
 
 @app.route("/api/me/picture", methods=["PUT", "POST"])
 def api_me_upload_pic():
@@ -420,16 +491,202 @@ def api_me_upload_pic():
     path = os.path.join(UPLOAD_FOLDER, filename)
     f.save(path)
 
-    # store relative path if model supports it
     if hasattr(user, "profile_pic"):
         user.profile_pic = f"/uploads/{filename}"
         db.session.commit()
 
     return jsonify({"success": True, "profile_pic": f"/uploads/{filename}"}), 200
 
+
 @app.route("/uploads/<path:filename>")
 def uploaded_file(filename):
     return send_from_directory(UPLOAD_FOLDER, filename)
+
+# ---------------------------------------------------------------
+# ✅ NEW OTP ENDPOINTS — Registration
+# ---------------------------------------------------------------
+@app.route("/otp/register/request", methods=["POST"])
+def otp_register_request():
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+
+    if not email:
+        return jsonify({"success": False, "message": "Email required"}), 400
+
+    if Users.query.filter_by(email=email).first():
+        return jsonify({"success": False, "message": "Email already exists"}), 409
+
+    otp = random.randint(100000, 999999)
+    pending_register_otps[email] = {
+        "otp": str(otp),
+        "expires": datetime.utcnow() + timedelta(minutes=5),
+    }
+
+    sent = send_email_otp(email, otp)
+    if not sent:
+        return jsonify({"success": False, "message": "Failed to send email"}), 500
+
+    return jsonify({"success": True}), 200
+
+
+@app.route("/otp/register/verify", methods=["POST"])
+def otp_register_verify():
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    otp = (data.get("otp") or "").strip()
+
+    rec = pending_register_otps.get(email)
+    if not rec:
+        return jsonify({"success": False, "message": "OTP not requested"}), 400
+
+    if datetime.utcnow() > rec["expires"]:
+        return jsonify({"success": False, "message": "OTP expired"}), 400
+
+    if rec["otp"] != otp:
+        return jsonify({"success": False, "message": "Invalid OTP"}), 400
+
+    username = data.get("username")
+    phone = data.get("phone")
+    password = data.get("password")
+
+    user = Users(username=username, email=email, phone=phone, password=password)
+    db.session.add(user)
+    db.session.commit()
+
+    token_value = str(uuid.uuid4())
+    user.token = token_value
+    db.session.commit()
+
+    pending_register_otps.pop(email, None)
+
+    return (
+        jsonify({"success": True, "token": token_value, "user": _user_to_dict(user)}),
+        200,
+    )
+
+# ---------------------------------------------------------------
+# ✅ NEW OTP ENDPOINTS — Login
+# ---------------------------------------------------------------
+@app.route("/otp/login/request", methods=["POST"])
+def otp_login_request():
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    password = (data.get("password") or "").strip()
+
+    user = Users.query.filter_by(email=email).first()
+    if not user or user.password != password:
+        return jsonify({"success": False, "message": "Invalid credentials"}), 401
+
+    otp = random.randint(100000, 999999)
+    temp_token = uuid.uuid4().hex
+
+    pending_login_otps[email] = {
+        "otp": str(otp),
+        "expires": datetime.utcnow() + timedelta(minutes=5),
+    }
+    login_temp_tokens[temp_token] = email
+
+    send_email_otp(email, otp)
+
+    return jsonify({"success": True, "tempToken": temp_token}), 200
+
+
+@app.route("/otp/login/verify", methods=["POST"])
+def otp_login_verify():
+    data = request.get_json(silent=True) or {}
+    temp = data.get("tempToken")
+    otp = (data.get("otp") or "").strip()
+
+    email = login_temp_tokens.get(temp)
+    if not email:
+        return jsonify({"success": False, "message": "Invalid temp token"}), 400
+
+    rec = pending_login_otps.get(email)
+    if not rec:
+        return jsonify({"success": False, "message": "OTP not requested"}), 400
+
+    if datetime.utcnow() > rec["expires"]:
+        return jsonify({"success": False, "message": "OTP expired"}), 400
+
+    if rec["otp"] != otp:
+        return jsonify({"success": False, "message": "Invalid OTP"}), 400
+
+    user = Users.query.filter_by(email=email).first()
+    token_value = str(uuid.uuid4())
+    user.token = token_value
+    db.session.commit()
+
+    pending_login_otps.pop(email, None)
+    login_temp_tokens.pop(temp, None)
+
+    return (
+        jsonify({"success": True, "token": token_value, "user": _user_to_dict(user)}),
+        200,
+    )
+    # ---------------------------------------------------------------
+# OTP endpoints — Forgot Password
+# ---------------------------------------------------------------
+@app.route("/otp/password/request", methods=["POST"])
+def otp_password_request():
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+
+    if not email:
+        return jsonify({"success": False, "message": "Email required"}), 400
+
+    user = Users.query.filter_by(email=email).first()
+    if not user:
+        # Don't reveal if email exists or not (security best practice),
+        # but for your project we can give a hint if you want.
+        return jsonify({"success": False, "message": "No account with this email"}), 404
+
+    otp = random.randint(100000, 999999)
+    pending_password_otps[email] = {
+        "otp": str(otp),
+        "expires": datetime.utcnow() + timedelta(minutes=5),
+    }
+
+    sent = send_email_otp(email, otp)
+    if not sent:
+        return jsonify({"success": False, "message": "Failed to send email"}), 500
+
+    return jsonify({"success": True}), 200
+
+
+@app.route("/otp/password/reset", methods=["POST"])
+def otp_password_reset():
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    otp = (data.get("otp") or "").strip()
+    new_password = (data.get("new_password") or "").strip()
+
+    if not email or not otp or not new_password:
+        return jsonify({"success": False, "message": "Missing fields"}), 400
+
+    rec = pending_password_otps.get(email)
+    if not rec:
+        return jsonify({"success": False, "message": "OTP not requested"}), 400
+
+    if datetime.utcnow() > rec["expires"]:
+        return jsonify({"success": False, "message": "OTP expired"}), 400
+
+    if rec["otp"] != otp:
+        return jsonify({"success": False, "message": "Invalid OTP"}), 400
+
+    user = Users.query.filter_by(email=email).first()
+    if not user:
+        return jsonify({"success": False, "message": "User not found"}), 404
+
+    # For now we keep plain-text password (same as your current logic).
+    user.password = new_password
+    db.session.commit()
+
+    # Clear used OTP
+    pending_password_otps.pop(email, None)
+
+    return jsonify({"success": True, "message": "Password updated"}), 200
+
+
 
 # ---------------------------
 # RUN SERVER
