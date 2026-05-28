@@ -1,16 +1,22 @@
-# internconnect_webapp_flutter
+Internship Finder
+Internship Finder is a Flutter-based application developed to help students explore internship opportunities efficiently.
 
-A new Flutter project.
+Team Members
+C.S. Sudharsann
+Sreesanth.S
+Darshan.A.R
+Mentorship Program
+This project was developed as part of the mentorship program conducted by Dcube.
 
-## Getting Started
-
-This project is a starting point for a Flutter application.
-
-A few resources to get you started if this is your first Flutter project:
-
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
-
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+Technologies Used
+Flutter
+Dart
+Render
+Features
+Internship Listings
+User Authentication
+Search Functionality
+Responsive UI
+Cross Platform Support
+Project Status
+Completed successfully under mentorship guidance and collaborative team development.
